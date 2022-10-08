@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Using Self-Signed Certificates In Go</title>
+    <link rel="stylesheet" type="text/css" href="whitepaper.css" />
+</head>
+
+<body>
+
+<div style="text-align: center;">
+    <h1>Introduction</h1>
+</div>
+<p>
+    I was working on a system that included a mobile app that talked to a web service.  In the past, when building
+    those kinds of systems, we built the server to have both an http and https implementation, and we would only
+    accept http connections on our local network.  Doing so gave us the ability to inspect and possibly alter the data
+    flowing between the mobile apps and the web service.  We found the ability to inspect and alter to be most useful
+    in debugging and writing system tests.  Some projects included a proxy
+    (<a href="https://github.com/GraciesPadre/httpProxy"> the proxy project is here</a>)
+    we configured to return predictable results or predictable errors as a means of validation.
+</p>
+
+<p>
+    Because we had both https and http servers, we could use the http connection when we wanted to read the traffic
+    without having to configure certificates
+    into a proxy.  A project I recently worked on included a server that only supplied https endpoints.  So, I thought
+    I'd just write myself a simple web server in go that exposed http endpoints mimicking those of the real service.
+    Then we could just add a scheme for the app to use the http server as the base URL for those endpoints where we
+    wanted to be able to provide controlled responses, possibly containing faults of our choosing.
+    However, for some time now, iOS has not allowed http connections without updating security settings in your app.
+    It got to be a maintenance problem providing separate security contexts for the different schemes in our app.
+    So, I decided to learn how to write a web server in go that would serve up https endpoints configured with
+    self-signed certificates, because I'm too big a miser to spring for authenticated certificates.
+</p>
+
+<p>
+    The result is this project -- a web server that serves up endpoints to simulate getting a system image update
+    file that would be used to keep a separate device's operating software image up to date.  It was surprisingly
+    easy to do.
+</p>
+
+<div style="text-align: center;">
+    <h1>Overview</h1>
+</div>
+
+<p>
+    The web server has 2 endpoints: one that returns a payload with latest available system image version, along
+    with the URL that returns the image file; and the second that is the endpoint that actually returns the
+    file.
+</p>
+
+<p>
+    I used <a href="https://github.com/gorilla/mux"> gorilla mux</a> to distribute endpoint requests to the
+    appropriate handler, because I like its syntax for specifying URL parameters.
+</p>
+
+<p>
+    You'll see several references to &quot;Gracie&quot; and &quot;Spitz&quot;.  Gracie is my dog -- a Spitz.
+    There is much contention about whether she is my dog or I am her human.
+</p>
+
+<p>
+    The &quot;binary image file&quot; the server returns is just a text file with numbers in it.
+</p>
+
+<div style="text-align: center;">
+    <h2>A Sample Session</h2>
+</div>
+
+<p>
+<pre>
+curl -v -k https://localhost:8080/update/2/latest | json_pp
+
+  *   Trying 127.0.0.1:8080...
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0* Connected to localhost (127.0.0.1) port 8080 (#0)
+* ALPN, offering h2
+* ALPN, offering http/1.1
+* TLSv1.0 (OUT), TLS header, Certificate Status (22):
+} [5 bytes data]
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+} [512 bytes data]
+* TLSv1.2 (IN), TLS header, Certificate Status (22):
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, Server hello (2):
+{ [122 bytes data]
+* TLSv1.2 (IN), TLS header, Finished (20):
+{ [5 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+{ [15 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, Certificate (11):
+{ [755 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, CERT verify (15):
+{ [264 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, Finished (20):
+{ [36 bytes data]
+* TLSv1.2 (OUT), TLS header, Finished (20):
+} [5 bytes data]
+* TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+} [1 bytes data]
+* TLSv1.2 (OUT), TLS header, Supplemental data (23):
+} [5 bytes data]
+* TLSv1.3 (OUT), TLS handshake, Finished (20):
+} [36 bytes data]
+* SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256
+* ALPN, server accepted to use h2
+* Server certificate:
+*  subject: C=US; ST=Colorado; CN=10.0.0.6
+*  start date: Sep 14 21:12:23 2022 GMT
+*  expire date: Sep 14 21:12:23 2023 GMT
+*  issuer: C=US; ST=Colorado; CN=10.0.0.6
+*  SSL certificate verify result: self-signed certificate (18), continuing anyway.
+* Using HTTP2, server supports multiplexing
+* Connection state changed (HTTP/2 confirmed)
+* Copying HTTP/2 data in stream buffer to connection buffer after upgrade: len=0
+* TLSv1.2 (OUT), TLS header, Supplemental data (23):
+} [5 bytes data]
+* TLSv1.2 (OUT), TLS header, Supplemental data (23):
+} [5 bytes data]
+* TLSv1.2 (OUT), TLS header, Supplemental data (23):
+} [5 bytes data]
+* Using Stream ID: 1 (easy handle 0x55c8b17c7e80)
+* TLSv1.2 (OUT), TLS header, Supplemental data (23):
+} [5 bytes data]
+> GET /update/2/latest HTTP/2
+> Host: localhost:8080
+> user-agent: curl/7.81.0
+> accept: */*
+>
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+{ [130 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* Connection state changed (MAX_CONCURRENT_STREAMS == 250)!
+* TLSv1.2 (OUT), TLS header, Supplemental data (23):
+} [5 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+< HTTP/2 200
+< content-type: application/json
+< content-length: 98
+< date: Sat, 08 Oct 2022 21:38:31 GMT
+<
+* TLSv1.2 (IN), TLS header, Supplemental data (23):
+{ [5 bytes data]
+
+100    98  100    98    0     0  21378      0 --:--:-- --:--:-- --:--:-- 24500
+* Connection #0 to host localhost left intact
+{
+   "deviceType" : "Spitz",
+   "url" : "https://10.0.0.28:8080/gracie/r_gracie_02.bin",
+   "version" : "gracie_02"
+}
+</pre>
+</p>
+
+<p>
+    Breaking down the curl command, &quot;2&quot; in the URL parameter is the device type code for our fictitious external device.  It has
+    no real significance otherwise.  The &quot;-k&quot; parameter instructs curl to accept a self-signed
+    certificate.  &quot;-v&quot; emits all the stuff we need to convince ourselves that there really is a certificate
+    exchange taking place.
+</p>
+
+<p>
+    We see the response has a URL pointing to our system image file.  Using that endpoint, we get
+</p>
+
+<p>
+<pre>
+curl -k https://10.0.0.28:8080/gracie/r_gracie_02.bin
+
+1
+...
+50000
+</pre>
+</p>
+
+<p>
+    Which is what we expect, as our image file is just a text file with numbers from 1 - 50000.
+</p>
+
+<div style="text-align: center;">
+    <h1>Implementation</h1>
+</div>
+
+<div style="text-align: center;">
+    <h2>Generating The Certificate</h2>
+</div>
+
+<p>
+    The first step is to generate a certificate signing request file.
+
+<pre>
+openssl req -new -subj "/C=US/ST=Colorado/CN=10.0.0.28" -newkey rsa:2048 -nodes -keyout localhost.key -out localhost.csr
+</pre>
+</p>
+
+<p>
+    Once we have that, we generate the actual certificate
+
+<pre>
+openssl x509 -req -days 365 -in localhost.csr -signkey localhost.key -out localhost.crt
+</pre>
+</p>
+
+<div style="text-align: center;">
+    <h2>Web Server Main</h2>
+</div>
+
+<p>
+    Once we have our certificate, serving up the content is simply a matter of using go's http module, calling
+    ListenAndServeTLS.
+
+<pre>
+func main() {
+	useHttp := false
+
+	for i, arg := range os.Args[1:] {
+		if arg == "-useHttp" {
+			useHttp = true
+		}
+
+		if arg == "-reportOldUpdateVersion" {
+			latestUpdateRev = "gracie_01"
+		}
+
+		if arg == "-networkInterfaceName" {
+			if len(os.Args) > i+2 {
+				// We're looking at args starting at index 1, so, to get the next arg, we need to increment
+				// the current arg index and add 1 to account for not starting at 0.
+				networkInterfaceName = os.Args[i+2]
+			}
+		}
+	}
+
+	router := mux.NewRouter()
+	router.HandleFunc("/update/{model}/latest", updateMetaDataHandler)
+	router.HandleFunc("/gracie/{fileName}", FileDownloadHandler)
+
+	fmt.Println("Starting update server on network interface:", networkInterfaceName, "port:", port)
+
+	if useHttp {
+		log.Fatalln(http.ListenAndServe(fmt.Sprintf(":%d", port), router))
+	} else {
+		<b>log.Fatalln(http.ListenAndServeTLS(fmt.Sprintf(":%d", port), "localhost.crt", "localhost.key", router))</b>
+	}
+}
+</pre>
+</p>
+
+<p>
+    ListenAndServeTLS takes as parameters the certificate file (localhost.crt) and key (localhost.key) we generated
+    from our certificate signing request file (localhost.csr).
+</p>
+
+<div style="text-align: center;">
+    <h1>Wrapping Up</h1>
+</div>
+
+<p>
+    The remaining part of this project that is of interest is serving up the system image file, which is included in file set
+    containing this document and the project source.  We set the http response content type to &quot;octet-stream&quot;.
+    Were we serving a bigger file, I'd probably use chunked encoding, but that's another project.
+
+<pre>
+func FileDownloadHandler(responseWriter http.ResponseWriter, httpRequest *http.Request) {
+	vars := mux.Vars(httpRequest)
+	fileName, ok := vars["fileName"]
+
+	if !ok {
+		responseWriter.WriteHeader(http.StatusInternalServerError)
+		_, err := responseWriter.Write([]byte("No file name in request\n"))
+		if err != nil {
+			fmt.Println("Could not write no file name response")
+		}
+
+		return
+	}
+
+	fileData, err := os.ReadFile(fileName)
+	if err != nil {
+		responseWriter.WriteHeader(http.StatusInternalServerError)
+		_, err := responseWriter.Write([]byte("Could not read file\n"))
+		if err != nil {
+			fmt.Println("Could not write read file response")
+		}
+
+		return
+	}
+
+	responseWriter.WriteHeader(http.StatusOK)
+	<b>responseWriter.Header().Set("Content-Type", "application/octet-stream")</b>
+	_, err = responseWriter.Write(fileData)
+	if err != nil {
+		fmt.Println("Writing result failed")
+	}
+}
+</pre>
+</p>
+
+<p>
+    So, there you have it.  The repo containing this document also contains the project source code.
+</p>
+
+</body>
+</html>
